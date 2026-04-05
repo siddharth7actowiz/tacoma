@@ -10,6 +10,7 @@ class products_scrap(scrapy.Spider):
 
         pipe = TacomaPipeline()
         pipe.open_spider(self)
+        #feting name and url form tacoma_product2 tab
         rows = pipe.fetch_pending_urls()
 
         if not rows:
@@ -26,10 +27,13 @@ class products_scrap(scrapy.Spider):
                     "url": row["url"]   
                 }
             )
+            
 
     #get categoryId
     def parse_api(self, response):
+
         name = response.meta["name"]
+        # url from product_urls stored in tacoma_product2 tab
         original_url = response.meta["url"]
 
         data = response.json()
@@ -39,7 +43,7 @@ class products_scrap(scrapy.Spider):
         if not cat_id:
             return
 
-        # get product list first (IMPORTANT FIX)
+        # get product list first 
         api = f"https://www.tacomascrew.com/api/v1/products/?categoryId={cat_id}&page=1&pageSize=5"
 
         yield scrapy.Request(
@@ -54,6 +58,7 @@ class products_scrap(scrapy.Spider):
     # STEP 2: get product IDs
     def parse_product_list(self, response):
         name = response.meta["name"]
+        # url from product_urls stored in tacoma_product2 tab
         original_url = response.meta["url"]
 
         data = response.json()
@@ -67,8 +72,8 @@ class products_scrap(scrapy.Spider):
                 continue
 
             headers = {
-                "accept": "application/json",
-                "user-agent": "Mozilla/5.0"
+                "accept": "application/json", # tells server that I want data in json format
+                "user-agent": "Mozilla/5.0" # tells server that im a browser
             }
 
             # product detail API
@@ -86,15 +91,15 @@ class products_scrap(scrapy.Spider):
                 }
             )
 
-    # STEP 3: final data
+    # final data
     def parse_prods(self, response):
+        # url from product_urls stored in tacoma_products2 tab
+        og_url=response.meta.get('url')
+        
         data = response.json()
-
         product = data.get("product", {})
-
         desc = product.get("htmlContent")
         desc_list = [ item.strip() for item in re.split(r"<br\s*/?>|•", desc) if item.strip()]
-
         id=product.get("name")
         img=product.get("largeImagePath")
         price=product.get("basicListPrice")
@@ -110,10 +115,11 @@ class products_scrap(scrapy.Spider):
                     temp["value"]=val.get("value")
                     att_data.append(temp)
                 
-
+        
         yield {
             "name": response.meta["name"],
             "p_id":id,
+            "url":og_url,
             "img_url":img,
             "price":price,
             "description": json.dumps(desc_list),
