@@ -1,32 +1,40 @@
-from mysql.connector import pooling
-from itemadapter import ItemAdapter
+from mysql.connector import pooling, Error
+
 
 class TacomaPipeline:
 
-    def open_spider(self, spider):
-        # setup the pool once
+    def __init__(self):
         self.pool = pooling.MySQLConnectionPool(
             pool_name="tacoma_pool",
-            pool_size=20,
+            pool_size=10,
             host="localhost",
             user="root",
             password="actowiz",
-            database="scrapy_db"
+            database="tacoma"
         )
-        
-    # cration connetion pool once and resusing it 
+
+    # -----------------------------
+    # OPEN SPIDER
+    # -----------------------------
+    def open_spider(self, spider):
         self.conn = self.pool.get_connection()
         self.cursor = self.conn.cursor()
+        self.create_table()
 
-    #because executemany takes lists 
-        self.batch_links = []
-        self.batch_products = []
-        self.batch_size = 50  
+    # -----------------------------
+    # CLOSE SPIDER
+    # -----------------------------
+    def close_spider(self, spider):
+        self.cursor.close()
+        self.conn.close()
 
-    # ddl commands
-        if spider.name == "spidy":
+    # -----------------------------
+    # CREATE TABLES
+    # -----------------------------
+    def create_table(self):
+        try:
             self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS tacoma_products2 (
+                CREATE TABLE IF NOT EXISTS tacoma_products_urls (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     category VARCHAR(255),
                     sub_category TEXT,
@@ -35,110 +43,76 @@ class TacomaPipeline:
                     status VARCHAR(20) DEFAULT 'pending'
                 )
             """)
-            self.conn.commit()
 
-        elif spider.name == "product":
             self.cursor.execute("""
-                CREATE TABLE IF NOT EXISTS tacoma_product (
+                CREATE TABLE IF NOT EXISTS product (
                     id INT AUTO_INCREMENT PRIMARY KEY,
                     name VARCHAR(255),
                     p_id VARCHAR(255),
+                    url TEXT,
                     description TEXT,
                     img_url TEXT,
-                    price DECIMAL(10,2),
+                    price VARCHAR(50),
                     shipping_weight VARCHAR(250),
-                    in_stock VARCHAR(250),
+                    in_stock VARCHAR(50),
                     specification TEXT
                 )
             """)
-            
+
             self.conn.commit()
 
+        except Error as e:
+            print(f"Table creation error: {e}")
+            self.conn.rollback()
 
-# update function
-    def update_status_done(self, url, tab="tacoma_products2"):
-        if not url:
-            return
-        
-        conn = self.pool.get_connection()
-        cursor = conn.cursor()
+    # -----------------------------
+    # PROCESS ITEM
+    # -----------------------------
+    def process_item(self, item, spider):
 
-        cursor.execute(f"""
-            UPDATE {tab}
+        if spider.name == "product2":
+            try:
+                self.insert_product(item)
+
+                if item.get("url"):
+                    self.update_status(item["url"])
+
+            except Error as e:
+                print(f"Process item error: {e}")
+                self.conn.rollback()
+
+        return item
+
+    # -----------------------------
+    # INSERT PRODUCT
+    # -----------------------------
+    def insert_product(self, item):
+        self.cursor.execute("""
+            INSERT INTO product
+            (name, p_id, url, description, img_url, price, shipping_weight, in_stock, specification)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """, (
+            item.get("name"),
+            item.get("p_id"),
+            item.get("url"),
+            item.get("description"),
+            item.get("img_url"),
+            item.get("price"),
+            item.get("shipping_weight"),
+            item.get("stock_qty"),
+            item.get("specification")
+        ))
+
+        self.conn.commit()
+
+    # -----------------------------
+    # UPDATE STATUS
+    # -----------------------------
+    def update_status(self, url):
+        self.cursor.execute("""
+            UPDATE tacoma_products_urls
             SET status = 'done'
             WHERE url = %s
         """, (url,))
 
-        conn.commit()
-        cursor.close()
-        conn.close()        
-
-
-#processiong function : gettiong data from spider to insert
-    def process_item(self, item, spider):
-        adapter = ItemAdapter(item)
-        #for 2 spiders   
-        if spider.name == "spidy":
-            url = adapter.get("prod_url")
-            if url:
-                self.batch_links.append((
-                    adapter.get("category"), adapter.get("sub_category"),
-                    adapter.get("name"), url, "pending"
-                ))
-                if len(self.batch_links) >= self.batch_size:
-                    self.insert_links_batch()
-
-        elif spider.name == "product":
-            self.batch_products.append((
-                adapter.get("name"), adapter.get("p_id"),
-                adapter.get("description"), adapter.get("img_url"),
-                adapter.get("price"), adapter.get("shipping_weight"),
-                adapter.get("in_stock"), adapter.get("specification")
-            ))
-            self.update_status_done(adapter.get("url"))
-            if len(self.batch_products) >= self.batch_size:
-                self.insert_product_batch()      
-        return item
-
-
-#fetch function : fetcing urls for tacoma_products2
-    def fetch_pending_urls(self, tab="tacoma_products2"):
-        self.cursor.execute(f"SELECT name, url FROM {tab} WHERE status = 'pending'")
-        return self.cursor.fetchall()
-
-
-#insert function for products links
-    def insert_links_batch(self):
-        if not self.batch_links: return
-        query = "INSERT IGNORE INTO tacoma_products2 (category, sub_category, name, url, status) VALUES (%s, %s, %s, %s, %s)"
-        try:
-            self.cursor.executemany(query, self.batch_links)
-            self.conn.commit()
-        except Exception as e:
-            print(f"Insert Error: {e}")
-        self.batch_links = []
-
-
-#insert function for products
-    def insert_product_batch(self):
-        if not self.batch_products: return
-        query = "INSERT INTO tacoma_product (name, p_id, description, img_url, price, shipping_weight, in_stock, specification) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"
-        try:
-            self.cursor.executemany(query, self.batch_products)
-            self.conn.commit()
-        except Exception as e:
-            print(f"Insert Error: {e}")
-        self.batch_products = []
-        
-
-#closing connetion and cursor objects
-    def close_spider(self):
-        # flush remaining batches
-        if self.batch_links: self.insert_links_batch()
-        if self.batch_products: self.insert_product_batch()
-        #closing
-        if self.cursor:
-            self.cursor.close()
-        if self.conn:
-            self.conn.close()
-
+        self.conn.commit()
